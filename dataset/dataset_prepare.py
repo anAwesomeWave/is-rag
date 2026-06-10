@@ -24,7 +24,7 @@ for row in ds:
 
 random.seed(42)
 random.shuffle(corpus)
-corpus = corpus[:2500]
+corpus = corpus[:4500]
 
 with open("corpus.json", "w") as f:
     for d in corpus:

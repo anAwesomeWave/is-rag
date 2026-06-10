@@ -1,84 +1,72 @@
 import json
-import os
-import re
-import sys
-import time
 from pathlib import Path
 
-from dotenv import load_dotenv
-from openai import OpenAI, RateLimitError, APIError
+import torch
 from tqdm import tqdm
+from transformers import T5ForConditionalGeneration, T5Tokenizer
 
-load_dotenv()
+INPUT_FILE = "corpus.json"
+OUTPUT_FILE = "queries.json"
+MODEL_NAME = "BeIR/query-gen-msmarco-t5-base-v1"
+BATCH_SIZE = 8
+N_CANDIDATES = 4 # for gen
+N_KEEP = 2 # after filtering
+MAX_INPUT_LEN = 384
+MAX_QUERY_LEN = 64
 
-INPUT_FILE = "corpus.jsonl"
-OUTPUT_FILE = "queries.jsonl"
-MODEL = "gemini-2.5-flash"
-SLEEP_BETWEEN = 4.2
-MAX_RETRIES_429 = 5
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"Device: {device}")
 
-assert os.getenv("GEMINI_API_KEY"), "GEMINI_API_KEY не найден в .env"
-
-client = OpenAI(
-    api_key=os.getenv("GEMINI_API_KEY"),
-    base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-)
-
-PROMPT = """You are helping build a retrieval dataset for cybersecurity. Given a CVE vulnerability description, generate 2 realistic search queries that a security analyst, developer, or SOC engineer would type to find this specific vulnerability.
-
-Requirements:
-- Query 1: SHORT keyword-style (3-7 words), like a Google search. Example style: "apache struts rce 2024", "openssl heap overflow tls"
-- Query 2: LONGER natural question (10-20 words), like asking a colleague. Example style: "Is there a known authentication bypass in Cisco ASA that allows accessing the admin panel without credentials?"
-- Do NOT copy exact phrases from the description verbatim. Paraphrase, use synonyms and security jargon.
-- Do NOT include the CVE ID in the queries (analysts often don't know it when searching).
-- Both queries must plausibly lead to THIS specific vulnerability, not generic ones.
-
-CVE description:
-{text}
-
-Return ONLY valid JSON, no markdown, no explanation:
-{{"q_short": "...", "q_long": "..."}}"""
+tokenizer = T5Tokenizer.from_pretrained(MODEL_NAME)
+model = T5ForConditionalGeneration.from_pretrained(MODEL_NAME).to(device).eval()
 
 
-def parse_response(text: str):
-    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip(), flags=re.MULTILINE)
-    m = re.search(r"\{.*\}", text, flags=re.DOTALL)
-    if not m:
-        raise ValueError("no JSON object in response")
-    data = json.loads(m.group(0))
-    q_short = data["q_short"].strip()
-    q_long = data["q_long"].strip()
-    if not (2 <= len(q_short.split()) <= 12):
-        raise ValueError(f"bad q_short length: {q_short!r}")
-    if not (6 <= len(q_long.split()) <= 30):
-        raise ValueError(f"bad q_long length: {q_long!r}")
-    return q_short, q_long
+def is_bad_query(q: str, doc_text: str) -> bool:
+    words = q.split()
+    if not (3 <= len(words) <= 25):
+        return True
+    if q.lower() in doc_text.lower():
+        return True
+
+    return False
 
 
-def generate_one(doc):
-    retries_429 = 0
-    for attempt in range(4):
-        try:
-            resp = client.chat.completions.create(
-                model=MODEL,
-                max_tokens=300,
-                temperature=0.7,
-                messages=[{"role": "user", "content": PROMPT.format(text=doc["text"][:2000])}],
-            )
-            return parse_response(resp.choices[0].message.content)
-        except RateLimitError as e:
-            retries_429 += 1
-            if retries_429 > MAX_RETRIES_429:
-                print("daily limit exceeded")
-                sys.exit(0)
-            wait = 20 * retries_429
-            print(f"\n[429] rate limit, жду {wait}s (попытка {retries_429}/{MAX_RETRIES_429})")
-            time.sleep(wait)
-        except (APIError, ValueError, KeyError, json.JSONDecodeError) as e:
-            if attempt == 3:
-                raise
-            time.sleep(2 ** attempt)
-    raise RuntimeError("unreachable")
+def pick_diverse(candidates, doc_text, n_keep):
+    seen_norm, picked = set(), []
+    for q in candidates:
+        q = q.strip()
+        norm = " ".join(sorted(set(q.lower().split())))
+        if is_bad_query(q, doc_text) or norm in seen_norm:
+            continue
+
+        seen_norm.add(norm)
+        picked.append(q)
+        if len(picked) == n_keep:
+            break
+
+    return picked
+
+
+@torch.no_grad()
+def generate_batch(texts):
+    inputs = tokenizer(
+        texts, return_tensors="pt", truncation=True,
+        max_length=MAX_INPUT_LEN, padding=True,
+    ).to(device)
+
+    outs = model.generate(
+        **inputs,
+        max_length=MAX_QUERY_LEN,
+        do_sample=True,
+        top_p=0.95,
+        temperature=1.0,
+        num_return_sequences=N_CANDIDATES,
+    )
+
+    decoded = tokenizer.batch_decode(outs, skip_special_tokens=True)
+
+
+    return [decoded[i * N_CANDIDATES:(i + 1) * N_CANDIDATES] for i in range(len(texts))]
 
 
 def main():
@@ -91,35 +79,35 @@ def main():
                 done_ids.add(json.loads(line)["cve_id"])
             except json.JSONDecodeError:
                 pass
-        print(f"Resume: уже обработано {len(done_ids)}")
+
+        print(f"already processed: {len(done_ids)}")
 
     todo = [d for d in corpus if d["cve_id"] not in done_ids]
-    print(f"Осталось обработать: {len(todo)} документов "
-          f"(~{len(todo) * SLEEP_BETWEEN / 60:.0f} минут при текущем rate limit)")
+    print(f"{len(todo)} docs needs to be processed")
 
-    failed = 0
+    skipped = 0
     with open(OUTPUT_FILE, "a", buffering=1, encoding="utf-8") as out:
-        for doc in tqdm(todo, desc="generating"):
-            t0 = time.time()
-            try:
-                q_short, q_long = generate_one(doc)
+        for i in tqdm(range(0, len(todo), BATCH_SIZE), desc="doc2query"):
+            batch = todo[i:i + BATCH_SIZE]
+            candidates_per_doc = generate_batch([d["text"] for d in batch])
+
+            for doc, candidates in zip(batch, candidates_per_doc):
+                picked = pick_diverse(candidates, doc["text"], N_KEEP)
+                if len(picked) < N_KEEP:
+                    skipped += 1
+                    continue
+
                 record = {
                     "cve_id": doc["cve_id"],
                     "queries": [
-                        {"query_id": f"{doc['cve_id']}__s", "text": q_short, "style": "short"},
-                        {"query_id": f"{doc['cve_id']}__l", "text": q_long, "style": "long"},
+                        {"query_id": f"{doc['cve_id']}__{j+1}",
+                         "text": q, "style": "doc2query"}
+                        for j, q in enumerate(picked)
                     ],
                 }
                 out.write(json.dumps(record, ensure_ascii=False) + "\n")
-            except Exception as e:
-                failed += 1
-                print(f"\nFAIL {doc['cve_id']}: {e}")
 
-            elapsed = time.time() - t0
-            if elapsed < SLEEP_BETWEEN:
-                time.sleep(SLEEP_BETWEEN - elapsed)
-
-    print(f"Готово. Ошибок: {failed}.")
+    print(f"Done. Skipped {skipped}")
 
 
 if __name__ == "__main__":
