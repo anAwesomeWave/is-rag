@@ -5,6 +5,11 @@ import torch
 from tqdm import tqdm
 from transformers import T5ForConditionalGeneration, T5Tokenizer
 
+print(torch.__version__)
+
+x = torch.randn(10, 10).cuda()
+print(x)
+
 INPUT_FILE = "corpus.json"
 OUTPUT_FILE = "queries.json"
 MODEL_NAME = "BeIR/query-gen-msmarco-t5-base-v1"
@@ -16,6 +21,7 @@ MAX_QUERY_LEN = 64
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Device: {device}")
+print(torch.cuda.get_device_name(0))
 
 tokenizer = T5Tokenizer.from_pretrained(MODEL_NAME)
 model = T5ForConditionalGeneration.from_pretrained(MODEL_NAME).to(device).eval()
