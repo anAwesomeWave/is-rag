@@ -1,13 +1,18 @@
+import pyarrow.dataset # без этого segfault на windows
 import json
 import time
+import os
 
 import numpy as np
 from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer, CrossEncoder
 from ranx import Qrels, Run, evaluate
 
-CORPUS_FILE = "corpus.json"
-TEST_FILE = "prepared_data/queries_test.jsonl"
+
+os.makedirs("runs", exist_ok=True)
+
+CORPUS_FILE = "dataset/corpus.json"
+TEST_FILE = "dataset/prepared_data/queries_test.json"
 TOP_K = 100  # candidate for second stage
 
 corpus = [json.loads(l) for l in open(CORPUS_FILE, encoding="utf-8")]
@@ -90,6 +95,7 @@ metrics = ["recall@100", "recall@10", "ndcg@10", "mrr@10"]
 print("\n" + "-" * 70)
 print(f"{'config':<18}" + "".join(f"{m:>13}" for m in metrics))
 print("-" * 70)
+
 for name, run_dict in runs.items():
     run = Run(run_dict, name=name)
     run.save(f"runs/{name.replace(' ', '_')}.json")
