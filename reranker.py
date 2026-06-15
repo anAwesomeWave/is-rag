@@ -35,10 +35,6 @@ train_doc_ids = sorted({q["target_doc"] for q in train_q})
 train_doc_texts = [text_by_id[d] for d in train_doc_ids]
 print(f"train-q: {len(train_q)}, doc len for negatives: {len(train_doc_ids)}")
 
-# ---------------- майнинг hard negatives через bi-encoder ----------------
-# негативы берем из top похожих: модель учится отличать релевантный документ
-# от похожих, а не от случайных - случайные она отличит и без обучения
-
 encoder = SentenceTransformer("intfloat/e5-base-v2")
 print("encode train-docs...")
 doc_emb = encoder.encode(["passage: " + t for t in train_doc_texts],
@@ -59,9 +55,6 @@ for q, emb in zip(train_q, q_emb):
 random.shuffle(examples)
 print(f"train pairs: {len(examples)}, positive {len(train_q)}, neg {len(examples) - len(train_q)})")
 
-# ---------------- обучение ----------------
-# num_labels=1 + метки 0/1 => бинарная классификация релевантности (BCE loss)
-
 model = CrossEncoder(BASE_MODEL, num_labels=1, max_length=320)
 loader = DataLoader(examples, shuffle=True, batch_size=BATCH)
 n_steps = len(loader) * EPOCHS
@@ -77,9 +70,6 @@ model.fit(
 print(f"learning time: {(time.time() - t0) / 60:.1f} мин")
 model.save(OUT_MODEL)
 print(f"model saved {OUT_MODEL}")
-
-# ---------------- финальная оценка ----------------
-# реранжируем ТЕ ЖЕ кандидаты первой стадии, что и в бейзлайне (из runs/)
 
 qrels = Qrels({q["query_id"]: {q["target_doc"]: 1} for q in test_q})
 
@@ -101,7 +91,7 @@ Run(bm25_ft_run, name="bm25+ce-ft").save("runs/bm25_ce_ft.json")
 dense_ft_run = rerank(dense_run, model)
 Run(dense_ft_run, name="bi-encoder+ce-ft").save("runs/bi-encoder_ce_ft.json")
 
-# собираем все 6 конфигураций: 4 из бейзлайна (с диска) + 2 новых
+# собираем все 6 конфигураций: 4 + 2 новых
 all_runs = {
     "bm25": bm25_run,
     "bi-encoder": dense_run,

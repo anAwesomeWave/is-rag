@@ -87,8 +87,6 @@ print(f"learning time: {(time.time() - t0) / 60:.1f} мин")
 model.save(OUT_MODEL)
 print(f"model saved {OUT_MODEL}")
 
-# ---------------- финальная оценка ----------------
-# реранжируем ТЕ ЖЕ кандидаты первой стадии, что и в бейзлайне (из runs/)
 
 qrels = Qrels({q["query_id"]: {q["target_doc"]: 1} for q in test_q})
 
