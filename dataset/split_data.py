@@ -8,9 +8,6 @@ OUT_DIR = Path("prepared_data")
 SEED = 1
 TEST_SHARE_PERC = 0.2 # 20% to 80% for train
 
-'''
-
-'''
 
 def main():
     OUT_DIR.mkdir(exist_ok=True)
